@@ -1,52 +1,42 @@
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import useBLE from "@/hooks/use-ble"
+import { View, Text, StyleSheet } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import SpectrumChart from '@/components/SpectrumChart';
 import { useBLEContext } from '@/contexts/BLEContext';
 
 export default function TabTwoScreen() {
-
-const {requestPermissions, 
-        scanForDevices, 
-        allDevices,
-        connectToDevice,
-        connectedDevice,
-        disconnectFromDevice,
-        spectrumChunk, sendSpectrum} = useBLEContext();
-
-const send = async () => {
-  sendSpectrum();
-}
-  
+  const { connectedDevice, spectrumChunk, sendSpectrum } = useBLEContext();
 
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
-        <View style={styles.container}>
-          {connectedDevice ? (
-            
-            <TouchableOpacity style={styles.button} onPress={send}>
-              <Text style={styles.text}>Primeiros canais: {spectrumChunk.slice(0, 10).join(", ")}</Text>
-            </TouchableOpacity>
-          ) : (
+        {connectedDevice ? (
+          <View style={styles.chartContainer}>
+            <SpectrumChart data={spectrumChunk} onPress={sendSpectrum} />
+          </View>
+        ) : (
+          <View style={styles.emptyContainer}>
             <Text style={styles.text}>Please connect your device</Text>
-          )}
-
-        </View>
+          </View>
+        )}
       </SafeAreaView>
     </SafeAreaProvider>
-  )
+  );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    flexDirection: 'column',
-    justifyContent: 'center',
+    backgroundColor: '#000000',
   },
-  button: {
+  chartContainer: {
     alignItems: 'center',
-    backgroundColor: "#DDDDDD",
-    padding: 10,
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 0,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
   },
   text: {
     color: 'gray',
