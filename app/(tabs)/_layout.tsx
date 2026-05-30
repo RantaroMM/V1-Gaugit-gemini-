@@ -46,6 +46,19 @@ export default function TabLayout() {
             ),
           }}
         />
+        <Tabs.Screen
+          name="monitor"
+          options={{
+            title: "Monitorar",
+            tabBarIcon: ({ color }) => (
+              <MaterialCommunityIcons
+                size={20}
+                name="monitor"
+                color={color}
+              />
+            ),
+          }}
+        />
       </Tabs>
     </BLEProvider>
   );
