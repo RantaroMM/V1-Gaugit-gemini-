@@ -15,6 +15,52 @@ const bleManager = new BleManager();
 const pStreamingService = "a88abeae-8757-4ebf-bdef-d5f1c721d5e4";
 const pEventChar = "0d13b83d-2684-47e5-aad4-24232365b381";
 const pSendChar = "2ce59705-3ce3-411c-9d4f-a2daa41a034d";
+const pStatusService = "eb1ef357-8127-481a-b8c5-df0edd94a059";
+const pStatusChar = "f411405e-29b0-4a76-b931-065fd46e011d";
+
+const STATUS_PACKET_MIN_LENGTH = 63;
+
+export interface StatusChunk {
+  totalPulses: number | null;
+  cps: number | null;
+  tempRp2350: number | null;
+  tempMspm0: number | null;
+  tempSipm: number | null;
+  vboost: number | null;
+  vTps: number | null;
+  vbat: number | null;
+  vbiasAct: number | null;
+  thrAct: number | null;
+  resetAct: number | null;
+  framWrites: number | null;
+  errors: number | null;
+  adcOvf: number | null;
+  rstStuck: number | null;
+  enAmpOp: number | null;
+  enBoost: number | null;
+  enLdo: number | null;
+}
+
+const emptyStatusChunk: StatusChunk = {
+  totalPulses: null,
+  cps: null,
+  tempRp2350: null,
+  tempMspm0: null,
+  tempSipm: null,
+  vboost: null,
+  vTps: null,
+  vbat: null,
+  vbiasAct: null,
+  thrAct: null,
+  resetAct: null,
+  framWrites: null,
+  errors: null,
+  adcOvf: null,
+  rstStuck: null,
+  enAmpOp: null,
+  enBoost: null,
+  enLdo: null,
+};
 
 interface BluetoothLowEnergyApi {
   requestPermissions(callback: PermissionCallback): Promise<void>;
@@ -24,6 +70,8 @@ interface BluetoothLowEnergyApi {
   connectedDevice: Device | null;
   disconnectFromDevice: () => void;
   spectrumChunk: number[]; //declara o SpectrumChunk como um array
+  statusChunk: StatusChunk;
+  sendStatusTelemetry: () => Promise<void>;
   sendSpectrum: () => Promise<void>; //declara se quer que envie o espectro ou não
 }
 
@@ -35,6 +83,8 @@ export default function useBLE(): BluetoothLowEnergyApi {
   ); /*cria o estado do espectro e 
                                                                                            o inicializa totalmente nulo
                                                                                           */
+  const [statusChunk, setStatusChunk] =
+    useState<StatusChunk>(emptyStatusChunk);
 
   const requestPermissions = async (callback: PermissionCallback) => {
     if (Platform.OS === "android") {
@@ -105,6 +155,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
         console.log("MTU de 517 solicitado e negociado.");
       }
       startStreamingData(deviceConnection); // monta o serviço, a característica e inicia a transmissão
+      startStatusTelemetry(deviceConnection);
     } catch (e) {
       console.log("ERROR IN CONNECTION", e);
     }
@@ -114,6 +165,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
     if (connectedDevice) {
       bleManager.cancelDeviceConnection(connectedDevice.id);
       setConnectedDevice(null);
+      setStatusChunk(emptyStatusChunk);
     }
   };
 
@@ -130,7 +182,6 @@ export default function useBLE(): BluetoothLowEnergyApi {
     }
     const rawData = toByteArray(characteristic.value); //transforma o envio de base 64 para um array de 43 posições, cada uma com 8 bytes
     const startBin = rawData[0] | (rawData[1] << 8); // startBin possui 2 bytes, [0] e [1]
-    const flag = rawData[2]; // a flag possui só 1 byte, [2]
 
     const photonId: number[] = []; //cria um array para armazenar os 40 bytes de fótons
     for (let i = 0; i < 10; i++) {
@@ -155,6 +206,76 @@ export default function useBLE(): BluetoothLowEnergyApi {
         }
       });
       return updated;
+    });
+  };
+
+  const onStatusChunkUpdate = (
+    error: BleError | null,
+    characteristic: Characteristic | null,
+  ) => {
+    if (error) {
+      console.log(error);
+      return;
+    } else if (!characteristic?.value) {
+      console.log("No status data received");
+      return;
+    }
+
+    const rawData = toByteArray(characteristic.value);
+    if (rawData.length < STATUS_PACKET_MIN_LENGTH) {
+      console.log(`Status packet incomplete: ${rawData.length} bytes`);
+      return;
+    }
+
+    const view = new DataView(
+      rawData.buffer,
+      rawData.byteOffset,
+      rawData.byteLength,
+    );
+    let offset = 0;
+
+    const readUint32 = () => {
+      const value = view.getUint32(offset, true);
+      offset += 4;
+      return value;
+    };
+
+    const readFloat32 = () => {
+      const value = view.getFloat32(offset, true);
+      offset += 4;
+      return value;
+    };
+
+    const readUint8 = () => {
+      const value = view.getUint8(offset);
+      offset += 1;
+      return value;
+    };
+
+    setStatusChunk({
+      // --- Counters and Flags ---
+      totalPulses: readUint32(),
+      resetAct: readUint32(),     // C++: rst_ns_act
+      errors: readUint32(),       // C++: err_flags
+      adcOvf: readUint32(),       // C++: adc_ovf
+      rstStuck: readUint32(),     // C++: rst_stuck
+      framWrites: readUint32(),   // C++: mem_writes
+  
+      // --- 2. Analog values and Setpoints ---
+      cps: readFloat32(),
+      vbiasAct: readFloat32(),
+      thrAct: readFloat32(),
+      tempSipm: readFloat32(),    // C++: t_sensor
+      tempMspm0: readFloat32(),   // C++: t_mspm0_die
+      tempRp2350: readFloat32(),  // C++: t_rp2350
+      vboost: readFloat32(),
+      vTps: readFloat32(),
+      vbat: readFloat32(),
+
+      // --- Booleans and small integers ---
+      enAmpOp: readUint8(),
+      enBoost: readUint8(),
+      enLdo: readUint8(),
     });
   };
 
@@ -192,8 +313,38 @@ export default function useBLE(): BluetoothLowEnergyApi {
     }
   };
 
+  const startStatusTelemetry = async (device: Device) => {
+    if (device) {
+      device.monitorCharacteristicForService(
+        pStatusService,
+        pStatusChar,
+        (error, characteristic) => onStatusChunkUpdate(error, characteristic),
+      );
+    } else {
+      console.log("No device connected");
+    }
+  };
+
   const sendSpectrum = async () => {
     await sendStartCommand();
+  };
+
+  const sendStatusTelemetry = async () => {
+    if (!connectedDevice) {
+      console.log("Nenhum dispositivo conectado");
+      return;
+    }
+
+    try {
+      const characteristic = await bleManager.readCharacteristicForDevice(
+        connectedDevice.id,
+        pStatusService,
+        pStatusChar,
+      );
+      onStatusChunkUpdate(null, characteristic);
+    } catch (error) {
+      console.log("Erro ao ler telemetria de status: ", error);
+    }
   };
 
   return {
@@ -205,5 +356,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
     disconnectFromDevice,
     spectrumChunk,
     sendSpectrum,
+    statusChunk,
+    sendStatusTelemetry,
   };
 }
