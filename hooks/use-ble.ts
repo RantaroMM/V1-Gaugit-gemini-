@@ -19,6 +19,7 @@ const pStatusService = "eb1ef357-8127-481a-b8c5-df0edd94a059";
 const pStatusChar = "f411405e-29b0-4a76-b931-065fd46e011d";
 
 const STATUS_PACKET_MIN_LENGTH = 63;
+export const ACQUIRING_STATE_FLAG = 1;
 
 export interface StatusChunk {
   totalPulses: number | null;
@@ -70,6 +71,7 @@ interface BluetoothLowEnergyApi {
   connectedDevice: Device | null;
   disconnectFromDevice: () => void;
   spectrumChunk: number[]; //declara o SpectrumChunk como um array
+  spectrumState: number | null;
   statusChunk: StatusChunk;
   sendStatusTelemetry: () => Promise<void>;
   sendSpectrum: () => Promise<void>; //declara se quer que envie o espectro ou não
@@ -83,6 +85,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
   ); /*cria o estado do espectro e 
                                                                                            o inicializa totalmente nulo
                                                                                           */
+  const [spectrumState, setSpectrumState] = useState<number | null>(null);
   const [statusChunk, setStatusChunk] =
     useState<StatusChunk>(emptyStatusChunk);
 
@@ -165,6 +168,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
     if (connectedDevice) {
       bleManager.cancelDeviceConnection(connectedDevice.id);
       setConnectedDevice(null);
+      setSpectrumState(null);
       setStatusChunk(emptyStatusChunk);
     }
   };
@@ -182,6 +186,9 @@ export default function useBLE(): BluetoothLowEnergyApi {
     }
     const rawData = toByteArray(characteristic.value); //transforma o envio de base 64 para um array de 43 posições, cada uma com 8 bytes
     const startBin = rawData[0] | (rawData[1] << 8); // startBin possui 2 bytes, [0] e [1]
+    const flag = rawData[2];
+
+    setSpectrumState(flag);
 
     const photonId: number[] = []; //cria um array para armazenar os 40 bytes de fótons
     for (let i = 0; i < 10; i++) {
@@ -261,7 +268,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
       rstStuck: readUint32(),     // C++: rst_stuck
       framWrites: readUint32(),   // C++: mem_writes
   
-      // --- 2. Analog values and Setpoints ---
+      // --- Analog values and Setpoints ---
       cps: readFloat32(),
       vbiasAct: readFloat32(),
       thrAct: readFloat32(),
@@ -276,6 +283,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
       enAmpOp: readUint8(),
       enBoost: readUint8(),
       enLdo: readUint8(),
+
     });
   };
 
@@ -355,6 +363,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
     connectedDevice,
     disconnectFromDevice,
     spectrumChunk,
+    spectrumState,
     sendSpectrum,
     statusChunk,
     sendStatusTelemetry,
