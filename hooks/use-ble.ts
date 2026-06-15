@@ -18,8 +18,11 @@ const pSendChar = "2ce59705-3ce3-411c-9d4f-a2daa41a034d";
 const pResetChar = "03e85034-ab5e-4292-824d-c8e80c2a2e70";
 const pStatusService = "eb1ef357-8127-481a-b8c5-df0edd94a059";
 const pStatusChar = "f411405e-29b0-4a76-b931-065fd46e011d";
+const pSetupService = "8add0583-abf6-4d44-9e5c-496818de399b";
+const pSetupChar = "2a6fe703-276b-4573-af1f-0fa6269b46ff";
 
 const STATUS_PACKET_MIN_LENGTH = 63;
+const SETUP_PACKET_LENGTH = 25;
 const IDLE_STATE_FLAG = 0;
 export const ACQUIRING_STATE_FLAG = 1;
 export const MAX_SPECTRUM_CHANNELS = 4096;
@@ -28,6 +31,16 @@ const MAX_DURATION_SECONDS = 0xffffffff;
 export interface SpectrumAcquisitionConfig {
   channels: number;
   durationSeconds: number;
+}
+
+export interface SetupConfig {
+  enableTempCorr: boolean;
+  breakdownV: number;
+  tempRef: number;
+  tempFactor: number;
+  vOvervoltage: number;
+  thresholdMv: number;
+  resetTimeNs: number;
 }
 
 export interface StatusChunk {
@@ -115,8 +128,11 @@ type BluetoothLowEnergyApiWithSpectrumConfig = Omit<
 > & {
   loadSpectrumData: (data: number[]) => void;
   pauseSpectrum: () => Promise<void>;
+  readSetupConfig: () => Promise<void>;
   resetSpectrum: () => Promise<void>;
+  sendSetupConfig: (config: SetupConfig) => Promise<void>;
   sendSpectrum: (config?: SpectrumAcquisitionConfig) => Promise<void>;
+  setupConfig: SetupConfig | null;
 };
 
 const normalizeSpectrumData = (data: number[]) => {
@@ -127,6 +143,44 @@ const normalizeSpectrumData = (data: number[]) => {
   });
 
   return spectrum;
+};
+
+const parseSetupConfig = (rawData: Uint8Array): SetupConfig | null => {
+  if (rawData.length < SETUP_PACKET_LENGTH) {
+    console.log(`Setup packet incomplete: ${rawData.length} bytes`);
+    return null;
+  }
+
+  const view = new DataView(
+    rawData.buffer,
+    rawData.byteOffset,
+    rawData.byteLength,
+  );
+
+  return {
+    enableTempCorr: view.getUint8(0) !== 0,
+    breakdownV: view.getFloat32(1, true),
+    tempRef: view.getFloat32(5, true),
+    tempFactor: view.getFloat32(9, true),
+    vOvervoltage: view.getFloat32(13, true),
+    thresholdMv: view.getFloat32(17, true),
+    resetTimeNs: view.getUint32(21, true),
+  };
+};
+
+const serializeSetupConfig = (config: SetupConfig) => {
+  const commandBytes = new Uint8Array(SETUP_PACKET_LENGTH);
+  const view = new DataView(commandBytes.buffer);
+
+  view.setUint8(0, config.enableTempCorr ? 1 : 0);
+  view.setFloat32(1, config.breakdownV, true);
+  view.setFloat32(5, config.tempRef, true);
+  view.setFloat32(9, config.tempFactor, true);
+  view.setFloat32(13, config.vOvervoltage, true);
+  view.setFloat32(17, config.thresholdMv, true);
+  view.setUint32(21, clampInteger(config.resetTimeNs, 0, 0xffffffff), true);
+
+  return commandBytes;
 };
 
 export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
@@ -140,6 +194,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
   const [spectrumState, setSpectrumState] = useState<number | null>(null);
   const [statusChunk, setStatusChunk] =
     useState<StatusChunk>(emptyStatusChunk);
+  const [setupConfig, setSetupConfig] = useState<SetupConfig | null>(null);
   const spectrumStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -235,6 +290,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
       }
       startStreamingData(deviceConnection); // monta o serviço, a característica e inicia a transmissão
       startStatusTelemetry(deviceConnection);
+      startSetupConfigTelemetry(deviceConnection);
     } catch (e) {
       console.log("ERROR IN CONNECTION", e);
     }
@@ -249,6 +305,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
       setConnectedDevice(null);
       setSpectrumState(null);
       setStatusChunk(emptyStatusChunk);
+      setSetupConfig(null);
     }
   };
 
@@ -380,6 +437,25 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     });
   };
 
+  const onSetupConfigUpdate = (
+    error: BleError | null,
+    characteristic: Characteristic | null,
+  ) => {
+    if (error) {
+      console.log(error);
+      return;
+    } else if (!characteristic?.value) {
+      console.log("No setup data received");
+      return;
+    }
+
+    const setupConfigUpdate = parseSetupConfig(toByteArray(characteristic.value));
+
+    if (setupConfigUpdate) {
+      setSetupConfig(setupConfigUpdate);
+    }
+  };
+
   const sendStartCommand = async (config?: SpectrumAcquisitionConfig) => {
     if (!connectedDevice) {
       console.log("Nenhum dispositivo conectado");
@@ -497,6 +573,70 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     }
   };
 
+  const readSetupConfig = async () => {
+    if (!connectedDevice) {
+      console.log("Nenhum dispositivo conectado");
+      return;
+    }
+
+    try {
+      const characteristic = await bleManager.readCharacteristicForDevice(
+        connectedDevice.id,
+        pSetupService,
+        pSetupChar,
+      );
+      onSetupConfigUpdate(null, characteristic);
+    } catch (error) {
+      console.log("Erro ao ler configuração de setup: ", error);
+    }
+  };
+
+  const sendSetupConfig = async (config: SetupConfig) => {
+    if (!connectedDevice) {
+      console.log("Nenhum dispositivo conectado");
+      return;
+    }
+
+    try {
+      const commandBase64 = fromByteArray(serializeSetupConfig(config));
+
+      await bleManager.writeCharacteristicWithResponseForDevice(
+        connectedDevice.id,
+        pSetupService,
+        pSetupChar,
+        commandBase64,
+      );
+      setSetupConfig(config);
+      console.log("Configuração de setup enviada!");
+    } catch (error) {
+      console.log("Erro ao enviar configuração de setup: ", error);
+      throw error;
+    }
+  };
+
+  const startSetupConfigTelemetry = async (device: Device) => {
+    if (device) {
+      device.monitorCharacteristicForService(
+        pSetupService,
+        pSetupChar,
+        (error, characteristic) => onSetupConfigUpdate(error, characteristic),
+      );
+
+      try {
+        const characteristic = await bleManager.readCharacteristicForDevice(
+          device.id,
+          pSetupService,
+          pSetupChar,
+        );
+        onSetupConfigUpdate(null, characteristic);
+      } catch (error) {
+        console.log("Erro ao ler configuração inicial de setup: ", error);
+      }
+    } else {
+      console.log("No device connected");
+    }
+  };
+
   const sendSpectrum = async (config?: SpectrumAcquisitionConfig) => {
     clearSpectrumStopTimer();
 
@@ -544,10 +684,13 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     connectedDevice,
     disconnectFromDevice,
     loadSpectrumData,
+    readSetupConfig,
     spectrumChunk,
     spectrumState,
+    setupConfig,
     pauseSpectrum,
     resetSpectrum,
+    sendSetupConfig,
     sendSpectrum,
     statusChunk,
     sendStatusTelemetry,
