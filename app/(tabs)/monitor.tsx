@@ -85,7 +85,7 @@ export default function TabThreeScreen() {
                 </ScrollView>
             ) : (
                 <View style={styles.emptyContainer}>
-                    <Text style={[styles.text]}>Please connect your device</Text>
+                    <Text style={[styles.text]}>Conecte seu dispositivo</Text>
                 </View>
             )}
             </SafeAreaView>

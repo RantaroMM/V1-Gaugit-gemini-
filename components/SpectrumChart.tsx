@@ -11,8 +11,10 @@ import {
 } from 'react-native';
 
 type SpectrumChartProps = {
+  channelCount?: number;
   data: number[];
   onPress?: () => void;
+  showPeakLabel?: boolean;
   style?: StyleProp<ViewStyle>;
 };
 
@@ -31,8 +33,10 @@ type SpectrumPeak = {
   y: number;
 };
 
-const X_DOMAIN_MAX = 4400;
-const X_TICKS = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000];
+const MAX_CHANNEL_COUNT = 4096;
+const X_TICK_INTERVAL = 500;
+const MIN_FINAL_TICK_DISTANCE = 250;
+const X_LABEL_WIDTH = 52;
 const HORIZONTAL_SEGMENTS = 16;
 const LOG_Y_MIN = 0;
 const DEFAULT_LOG_Y_MAX = 1;
@@ -61,8 +65,32 @@ const clamp = (value: number, min: number, max: number) => {
   return Math.min(Math.max(value, min), max);
 };
 
-const getX = (xValue: number, bounds: ChartBounds) => {
-  return bounds.left + (xValue / X_DOMAIN_MAX) * bounds.plotWidth;
+const getDomainMax = (channelCount?: number) => {
+  if (typeof channelCount !== 'number' || !Number.isFinite(channelCount)) {
+    return MAX_CHANNEL_COUNT;
+  }
+
+  return clamp(Math.trunc(channelCount), 1, MAX_CHANNEL_COUNT);
+};
+
+const getXTicks = (domainMax: number) => {
+  const ticks = [0];
+
+  for (let tick = X_TICK_INTERVAL; tick < domainMax; tick += X_TICK_INTERVAL) {
+    if (domainMax - tick >= MIN_FINAL_TICK_DISTANCE) {
+      ticks.push(tick);
+    }
+  }
+
+  if (ticks[ticks.length - 1] !== domainMax) {
+    ticks.push(domainMax);
+  }
+
+  return ticks;
+};
+
+const getX = (xValue: number, bounds: ChartBounds, domainMax: number) => {
+  return bounds.left + (xValue / domainMax) * bounds.plotWidth;
 };
 
 const getY = (value: number, bounds: ChartBounds, logYMax: number) => {
@@ -76,9 +104,9 @@ const getY = (value: number, bounds: ChartBounds, logYMax: number) => {
   return bounds.yScaleBottom - normalized * bounds.plotHeight;
 };
 
-const getLogYMax = (data: number[]) => {
-  const maxValue = data.reduce((currentMax, value) => {
-    if (!Number.isFinite(value) || value <= 0) {
+const getLogYMax = (data: number[], domainMax: number) => {
+  const maxValue = data.reduce((currentMax, value, index) => {
+    if (!Number.isFinite(value) || value <= 0 || index >= domainMax) {
       return currentMax;
     }
 
@@ -92,9 +120,9 @@ const getLogYMax = (data: number[]) => {
   return Math.max(DEFAULT_LOG_Y_MAX, Math.ceil(Math.log10(maxValue)));
 };
 
-const getPeak = (data: number[]): SpectrumPeak => {
+const getPeak = (data: number[], domainMax: number): SpectrumPeak => {
   return data.reduce<SpectrumPeak>((currentPeak, value, index) => {
-    if (!Number.isFinite(value) || index > X_DOMAIN_MAX) {
+    if (!Number.isFinite(value) || index >= domainMax) {
       return currentPeak;
     }
 
@@ -114,15 +142,26 @@ const formatPeakValue = (value: number) => {
   return value.toFixed(2);
 };
 
-export default function SpectrumChart({ data, onPress, style }: SpectrumChartProps) {
+export default function SpectrumChart({
+  channelCount,
+  data,
+  onPress,
+  showPeakLabel = false,
+  style,
+}: SpectrumChartProps) {
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   const bounds = useMemo(
     () => getBounds(size.width, size.height),
     [size.height, size.width],
   );
-  const logYMax = useMemo(() => getLogYMax(data), [data]);
-  const peak = useMemo(() => getPeak(data), [data]);
+  const domainMax = useMemo(() => getDomainMax(channelCount), [channelCount]);
+  const xTicks = useMemo(() => getXTicks(domainMax), [domainMax]);
+  const logYMax = useMemo(() => getLogYMax(data, domainMax), [data, domainMax]);
+  const peak = useMemo(
+    () => (showPeakLabel ? getPeak(data, domainMax) : null),
+    [data, domainMax, showPeakLabel],
+  );
 
   const gridPath = useMemo(() => {
     const path = Skia.Path.Make();
@@ -133,14 +172,14 @@ export default function SpectrumChart({ data, onPress, style }: SpectrumChartPro
       path.lineTo(bounds.right, y);
     }
 
-    X_TICKS.forEach((tick) => {
-      const x = getX(tick, bounds);
+    xTicks.forEach((tick) => {
+      const x = getX(tick, bounds, domainMax);
       path.moveTo(x, bounds.top);
       path.lineTo(x, bounds.xAxisY);
     });
 
     return path;
-  }, [bounds]);
+  }, [bounds, domainMax, xTicks]);
 
   const axisPath = useMemo(() => {
     const path = Skia.Path.Make();
@@ -157,12 +196,12 @@ export default function SpectrumChart({ data, onPress, style }: SpectrumChartPro
     let isDrawing = false;
 
     data.forEach((value, index) => {
-      if (!Number.isFinite(value) || index > X_DOMAIN_MAX) {
+      if (!Number.isFinite(value) || index >= domainMax) {
         isDrawing = false;
         return;
       }
 
-      const x = getX(index, bounds);
+      const x = getX(index, bounds, domainMax);
       const y = getY(Math.max(value, 1), bounds, logYMax);
 
       if (isDrawing) {
@@ -175,7 +214,7 @@ export default function SpectrumChart({ data, onPress, style }: SpectrumChartPro
     });
 
     return path;
-  }, [bounds, data, logYMax]);
+  }, [bounds, data, domainMax, logYMax]);
 
   const handleLayout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -204,17 +243,23 @@ export default function SpectrumChart({ data, onPress, style }: SpectrumChartPro
       <PowerLabel exponent={String(logYMax)} style={{ top: bounds.top - 10 }} />
       <PowerLabel exponent="0" style={{ top: bounds.yScaleBottom - 10 }} />
 
-      <Text pointerEvents="none" style={styles.peakLabel}>
-        Peak: y={formatPeakValue(peak.y)} x={peak.x}
-      </Text>
+      {peak ? (
+        <Text pointerEvents="none" style={styles.peakLabel}>
+          Peak: y={formatPeakValue(peak.y)} x={peak.x}
+        </Text>
+      ) : null}
 
-      {X_TICKS.map((tick) => (
+      {xTicks.map((tick) => (
         <Text
           key={tick}
           style={[
             styles.xLabel,
             {
-              left: getX(tick, bounds) - 23,
+              left: clamp(
+                getX(tick, bounds, domainMax) - X_LABEL_WIDTH / 2,
+                0,
+                Math.max(size.width - X_LABEL_WIDTH, 0),
+              ),
               top: bounds.xAxisY + 8,
             },
           ]}>
@@ -279,6 +324,6 @@ const styles = StyleSheet.create({
     lineHeight: 11,
     position: 'absolute',
     textAlign: 'center',
-    width: 46,
+    width: X_LABEL_WIDTH,
   },
 });
