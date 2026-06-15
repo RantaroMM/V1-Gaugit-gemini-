@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PermissionsAndroid, Platform } from "react-native";
 import {
   BleError,
@@ -15,11 +15,20 @@ const bleManager = new BleManager();
 const pStreamingService = "a88abeae-8757-4ebf-bdef-d5f1c721d5e4";
 const pEventChar = "0d13b83d-2684-47e5-aad4-24232365b381";
 const pSendChar = "2ce59705-3ce3-411c-9d4f-a2daa41a034d";
+const pResetChar = "03e85034-ab5e-4292-824d-c8e80c2a2e70";
 const pStatusService = "eb1ef357-8127-481a-b8c5-df0edd94a059";
 const pStatusChar = "f411405e-29b0-4a76-b931-065fd46e011d";
 
 const STATUS_PACKET_MIN_LENGTH = 63;
+const IDLE_STATE_FLAG = 0;
 export const ACQUIRING_STATE_FLAG = 1;
+export const MAX_SPECTRUM_CHANNELS = 4096;
+const MAX_DURATION_SECONDS = 0xffffffff;
+
+export interface SpectrumAcquisitionConfig {
+  channels: number;
+  durationSeconds: number;
+}
 
 export interface StatusChunk {
   totalPulses: number | null;
@@ -77,17 +86,84 @@ interface BluetoothLowEnergyApi {
   sendSpectrum: () => Promise<void>; //declara se quer que envie o espectro ou não
 }
 
-export default function useBLE(): BluetoothLowEnergyApi {
+const clampInteger = (value: number, min: number, max: number) => {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(Math.trunc(value), min), max);
+};
+
+const normalizeSpectrumConfig = (
+  config?: SpectrumAcquisitionConfig,
+): SpectrumAcquisitionConfig => ({
+  channels: clampInteger(
+    config?.channels ?? MAX_SPECTRUM_CHANNELS,
+    1,
+    MAX_SPECTRUM_CHANNELS,
+  ),
+  durationSeconds: clampInteger(
+    config?.durationSeconds ?? 0,
+    0,
+    MAX_DURATION_SECONDS,
+  ),
+});
+
+type BluetoothLowEnergyApiWithSpectrumConfig = Omit<
+  BluetoothLowEnergyApi,
+  "sendSpectrum"
+> & {
+  loadSpectrumData: (data: number[]) => void;
+  pauseSpectrum: () => Promise<void>;
+  resetSpectrum: () => Promise<void>;
+  sendSpectrum: (config?: SpectrumAcquisitionConfig) => Promise<void>;
+};
+
+const normalizeSpectrumData = (data: number[]) => {
+  const spectrum = new Array(MAX_SPECTRUM_CHANNELS).fill(0);
+
+  data.slice(0, MAX_SPECTRUM_CHANNELS).forEach((value, index) => {
+    spectrum[index] = Number.isFinite(value) ? Math.max(value, 0) : 0;
+  });
+
+  return spectrum;
+};
+
+export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
   const [allDevices, setAllDevices] = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [spectrumChunk, setSpectrumChunk] = useState<number[]>(
-    new Array(4096).fill(0),
+    new Array(MAX_SPECTRUM_CHANNELS).fill(0),
   ); /*cria o estado do espectro e 
                                                                                            o inicializa totalmente nulo
                                                                                           */
   const [spectrumState, setSpectrumState] = useState<number | null>(null);
   const [statusChunk, setStatusChunk] =
     useState<StatusChunk>(emptyStatusChunk);
+  const spectrumStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const spectrumAcquisitionActiveRef = useRef(false);
+  const spectrumPauseRequestedRef = useRef(false);
+
+  const clearSpectrumStopTimer = () => {
+    if (spectrumStopTimeoutRef.current) {
+      clearTimeout(spectrumStopTimeoutRef.current);
+      spectrumStopTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      spectrumAcquisitionActiveRef.current = false;
+      spectrumPauseRequestedRef.current = false;
+
+      if (spectrumStopTimeoutRef.current) {
+        clearTimeout(spectrumStopTimeoutRef.current);
+        spectrumStopTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   const requestPermissions = async (callback: PermissionCallback) => {
     if (Platform.OS === "android") {
@@ -166,6 +242,9 @@ export default function useBLE(): BluetoothLowEnergyApi {
 
   const disconnectFromDevice = () => {
     if (connectedDevice) {
+      clearSpectrumStopTimer();
+      spectrumAcquisitionActiveRef.current = false;
+      spectrumPauseRequestedRef.current = false;
       bleManager.cancelDeviceConnection(connectedDevice.id);
       setConnectedDevice(null);
       setSpectrumState(null);
@@ -188,7 +267,21 @@ export default function useBLE(): BluetoothLowEnergyApi {
     const startBin = rawData[0] | (rawData[1] << 8); // startBin possui 2 bytes, [0] e [1]
     const flag = rawData[2];
 
-    setSpectrumState(flag);
+    if (spectrumAcquisitionActiveRef.current) {
+      setSpectrumState(ACQUIRING_STATE_FLAG);
+    } else if (
+      spectrumPauseRequestedRef.current &&
+      flag === ACQUIRING_STATE_FLAG
+    ) {
+      setSpectrumState(IDLE_STATE_FLAG);
+    } else {
+      spectrumPauseRequestedRef.current = false;
+      setSpectrumState(flag);
+    }
+
+    if (!spectrumAcquisitionActiveRef.current && flag !== ACQUIRING_STATE_FLAG) {
+      clearSpectrumStopTimer();
+    }
 
     const photonId: number[] = []; //cria um array para armazenar os 40 bytes de fótons
     for (let i = 0; i < 10; i++) {
@@ -208,7 +301,7 @@ export default function useBLE(): BluetoothLowEnergyApi {
       photonId.forEach((count, index) => {
         //count é o valor atual e index a posição dele dentro do pacote
         const targetBin = startBin + index;
-        if (targetBin < 4096) {
+        if (targetBin < MAX_SPECTRUM_CHANNELS) {
           updated[targetBin] = count;
         }
       });
@@ -287,14 +380,24 @@ export default function useBLE(): BluetoothLowEnergyApi {
     });
   };
 
-  const sendStartCommand = async () => {
+  const sendStartCommand = async (config?: SpectrumAcquisitionConfig) => {
     if (!connectedDevice) {
       console.log("Nenhum dispositivo conectado");
-      return;
+      return null;
     }
 
+    const acquisitionConfig = normalizeSpectrumConfig(config);
+
     try {
-      const commandBytes = new Uint8Array([0x01]);
+      const commandBytes = new Uint8Array(7);
+      commandBytes[0] = 0x01;
+      commandBytes[1] = acquisitionConfig.channels & 0xff;
+      commandBytes[2] = (acquisitionConfig.channels >> 8) & 0xff;
+      commandBytes[3] = acquisitionConfig.durationSeconds & 0xff;
+      commandBytes[4] = (acquisitionConfig.durationSeconds >> 8) & 0xff;
+      commandBytes[5] = (acquisitionConfig.durationSeconds >> 16) & 0xff;
+      commandBytes[6] = (acquisitionConfig.durationSeconds >> 24) & 0xff;
+
       const commandBase64 = fromByteArray(commandBytes);
 
       await bleManager.writeCharacteristicWithResponseForDevice(
@@ -304,9 +407,70 @@ export default function useBLE(): BluetoothLowEnergyApi {
         commandBase64,
       );
       console.log("Comando de início enviado!");
+      return acquisitionConfig;
     } catch (error) {
       console.log("Erro ao enviar comando de ínicio: ", error);
+      return null;
     }
+  };
+
+  const sendStopCommand = async () => {
+    if (!connectedDevice) {
+      console.log("Nenhum dispositivo conectado");
+      return;
+    }
+
+    try {
+      const commandBytes = new Uint8Array([0x00]);
+      const commandBase64 = fromByteArray(commandBytes);
+
+      await bleManager.writeCharacteristicWithResponseForDevice(
+        connectedDevice.id,
+        pStreamingService,
+        pSendChar,
+        commandBase64,
+      );
+      console.log("Comando de fim enviado!");
+    } catch (error) {
+      console.log("Erro ao enviar comando de fim: ", error);
+    }
+  };
+
+  const pauseSpectrum = async () => {
+    clearSpectrumStopTimer();
+    spectrumAcquisitionActiveRef.current = false;
+    spectrumPauseRequestedRef.current = true;
+    setSpectrumState(IDLE_STATE_FLAG);
+
+    await sendStopCommand();
+  };
+
+  const resetSpectrum = async () => {
+    if (!connectedDevice) {
+      console.log("Nenhum dispositivo conectado");
+      return;
+    }
+
+    try {
+      const commandBytes = new Uint8Array([0x01]);
+      const commandBase64 = fromByteArray(commandBytes);
+
+      await bleManager.writeCharacteristicWithoutResponseForDevice(
+        connectedDevice.id,
+        pStreamingService,
+        pResetChar,
+        commandBase64,
+      );
+
+      setSpectrumChunk(new Array(MAX_SPECTRUM_CHANNELS).fill(0));
+      console.log("Comando de reset enviado!");
+    } catch (error) {
+      console.log("Erro ao enviar comando de reset: ", error);
+    }
+  };
+
+  const loadSpectrumData = (data: number[]) => {
+    setSpectrumChunk(normalizeSpectrumData(data));
   };
 
   const startStreamingData = async (device: Device) => {
@@ -333,8 +497,25 @@ export default function useBLE(): BluetoothLowEnergyApi {
     }
   };
 
-  const sendSpectrum = async () => {
-    await sendStartCommand();
+  const sendSpectrum = async (config?: SpectrumAcquisitionConfig) => {
+    clearSpectrumStopTimer();
+
+    const acquisitionConfig = await sendStartCommand(config);
+    if (!acquisitionConfig) {
+      return;
+    }
+
+    spectrumAcquisitionActiveRef.current = true;
+    spectrumPauseRequestedRef.current = false;
+    setSpectrumState(ACQUIRING_STATE_FLAG);
+    setSpectrumChunk(new Array(MAX_SPECTRUM_CHANNELS).fill(0));
+
+    if (acquisitionConfig.durationSeconds > 0) {
+      spectrumStopTimeoutRef.current = setTimeout(() => {
+        spectrumStopTimeoutRef.current = null;
+        void pauseSpectrum();
+      }, acquisitionConfig.durationSeconds * 1000);
+    }
   };
 
   const sendStatusTelemetry = async () => {
@@ -362,8 +543,11 @@ export default function useBLE(): BluetoothLowEnergyApi {
     connectToDevice,
     connectedDevice,
     disconnectFromDevice,
+    loadSpectrumData,
     spectrumChunk,
     spectrumState,
+    pauseSpectrum,
+    resetSpectrum,
     sendSpectrum,
     statusChunk,
     sendStatusTelemetry,
