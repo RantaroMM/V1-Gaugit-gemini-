@@ -1,3 +1,4 @@
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import React, {FC, useCallback} from 'react';
 import {
   FlatList,
@@ -6,6 +7,7 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
+  View,
 } from 'react-native';
 import {Device} from 'react-native-ble-plx';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -61,11 +63,21 @@ const DeviceModal: FC<DeviceModalProps> = props => {
       style={modalStyle.modalContainer}
       animationType="slide"
       transparent={false}
-      visible={visible}>
+      visible={visible}
+      onRequestClose={closeModal}>
       <SafeAreaProvider style={modalStyle.modalTitle}>
-        <Text style={modalStyle.modalTitleText}>
-          Tap on a device to connect
-        </Text>
+        <View style={modalStyle.modalHeader}>
+          <Text style={modalStyle.modalTitleText}>
+            Tap on a device to connect
+          </Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Fechar modal"
+            onPress={closeModal}
+            style={modalStyle.closeButton}>
+            <MaterialCommunityIcons name="close" size={28} color="#1a1a1a" />
+          </TouchableOpacity>
+        </View>
         <FlatList
           contentContainerStyle={modalStyle.modalFlatlistContiner}
           data={devices}
@@ -97,12 +109,29 @@ const modalStyle = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f2f2f2',
   },
-  modalTitleText: {
+  modalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginHorizontal: 20,
     marginTop: 40,
+    minHeight: 44,
+    position: 'relative',
+  },
+  modalTitleText: {
     fontSize: 30,
     fontWeight: 'bold',
-    marginHorizontal: 20,
+    paddingHorizontal: 44,
     textAlign: 'center',
+  },
+  closeButton: {
+    alignItems: 'center',
+    height: 44,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: 44,
   },
   ctaButton: {
     backgroundColor: 'purple',
