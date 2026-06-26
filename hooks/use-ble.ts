@@ -23,6 +23,8 @@ const pSetupChar = "2a6fe703-276b-4573-af1f-0fa6269b46ff";
 
 const STATUS_PACKET_MIN_LENGTH = 63;
 const SETUP_PACKET_LENGTH = 25;
+const SPECTRUM_PACKET_HEADER_LENGTH = 3;
+const SPECTRUM_COUNT_BYTE_LENGTH = 4;
 const IDLE_STATE_FLAG = 0;
 export const ACQUIRING_STATE_FLAG = 1;
 export const MAX_SPECTRUM_CHANNELS = 4096;
@@ -97,6 +99,8 @@ interface BluetoothLowEnergyApi {
   statusChunk: StatusChunk;
   sendStatusTelemetry: () => Promise<void>;
   sendSpectrum: () => Promise<void>; //declara se quer que envie o espectro ou não
+  rssi: number | null;
+  readRssi: () => Promise<void>;
 }
 
 const clampInteger = (value: number, min: number, max: number) => {
@@ -183,6 +187,32 @@ const serializeSetupConfig = (config: SetupConfig) => {
   return commandBytes;
 };
 
+const parseSpectrumCounts = (rawData: Uint8Array) => {
+  const countBytes = rawData.length - SPECTRUM_PACKET_HEADER_LENGTH;
+  const countLength = Math.floor(countBytes / SPECTRUM_COUNT_BYTE_LENGTH);
+  const trailingBytes = countBytes % SPECTRUM_COUNT_BYTE_LENGTH;
+
+  if (trailingBytes > 0) {
+    console.log(`Spectrum packet ignored ${trailingBytes} trailing byte(s)`);
+  }
+
+  const counts = new Array<number>(countLength);
+  const view = new DataView(
+    rawData.buffer,
+    rawData.byteOffset,
+    rawData.byteLength,
+  );
+
+  for (let index = 0; index < countLength; index++) {
+    const offset =
+      SPECTRUM_PACKET_HEADER_LENGTH + index * SPECTRUM_COUNT_BYTE_LENGTH;
+
+    counts[index] = view.getUint32(offset, true);
+  }
+
+  return counts;
+};
+
 export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
   const [allDevices, setAllDevices] = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
@@ -198,6 +228,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
   const spectrumStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const [rssi, setRssi] = useState<number | null>(null);
   const spectrumAcquisitionActiveRef = useRef(false);
   const spectrumPauseRequestedRef = useRef(false);
 
@@ -285,8 +316,8 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
       bleManager.stopDeviceScan();
 
       if (Platform.OS === "android") {
-        await deviceConnection.requestMTU(517); //solicita MTU para transmitir os 43 bytes corretamente e inteiramente
-        console.log("MTU de 517 solicitado e negociado.");
+        const updatedDevice = await deviceConnection.requestMTU(517); //solicita MTU para transmitir os bytes corretamente e inteiramente
+        console.log("MTU negociado:", updatedDevice.mtu);
       }
       startStreamingData(deviceConnection); // monta o serviço, a característica e inicia a transmissão
       startStatusTelemetry(deviceConnection);
@@ -320,7 +351,12 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
       console.log("No Data Recieved");
       return;
     }
-    const rawData = toByteArray(characteristic.value); //transforma o envio de base 64 para um array de 43 posições, cada uma com 8 bytes
+    const rawData = toByteArray(characteristic.value); //transforma o envio de base 64 para um array de bytes
+    if (rawData.length < SPECTRUM_PACKET_HEADER_LENGTH) {
+      console.log(`Spectrum packet incomplete: ${rawData.length} bytes`);
+      return;
+    }
+
     const startBin = rawData[0] | (rawData[1] << 8); // startBin possui 2 bytes, [0] e [1]
     const flag = rawData[2];
 
@@ -340,18 +376,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
       clearSpectrumStopTimer();
     }
 
-    const photonId: number[] = []; //cria um array para armazenar os 40 bytes de fótons
-    for (let i = 0; i < 10; i++) {
-      const offset = 3 + i * 4;
-
-      const photonValue =
-        (rawData[offset] |
-          (rawData[offset + 1] << 8) |
-          (rawData[offset + 2] << 16) |
-          (rawData[offset + 3] << 24)) >>>
-        0;
-      photonId.push(photonValue);
-    }
+    const photonId = parseSpectrumCounts(rawData);
     setSpectrumChunk((prevSpectrum) => {
       //atualiza o estado do espectro
       const updated = [...prevSpectrum];
@@ -658,6 +683,34 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     }
   };
 
+  const readRssi = async () => {
+  if (!connectedDevice) {
+    return;
+  }
+
+  try {
+    const deviceWithRssi = await connectedDevice.readRSSI();
+    setRssi(deviceWithRssi.rssi ?? null);
+
+    console.log("RSSI:", deviceWithRssi.rssi);
+    } catch (error) {
+    console.log("Erro ao ler RSSI:", error);
+    }
+  };
+
+  useEffect(() => {
+  if (!connectedDevice) {
+    setRssi(null);
+    return;
+  }
+
+  const interval = setInterval(() => {
+    readRssi();
+  }, 1000);
+
+  return () => clearInterval(interval);
+}, [connectedDevice]);
+
   const sendStatusTelemetry = async () => {
     if (!connectedDevice) {
       console.log("Nenhum dispositivo conectado");
@@ -694,5 +747,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     sendSpectrum,
     statusChunk,
     sendStatusTelemetry,
+    rssi,
+    readRssi
   };
 }

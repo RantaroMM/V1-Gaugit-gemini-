@@ -17,9 +17,25 @@ type HomeStatusRow = {
   value: string;
 };
 
+type SignalInfo = {
+  color: string;
+  iconName: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  label: string;
+  value: string;
+};
+
 const stateLabels: Record<number, string> = {
   0: 'IDLE',
   [ACQUIRING_STATE_FLAG]: 'ACQUIRING',
+};
+
+const signalColors = {
+  excellent: '#0B6B3A',
+  strong: '#7ED957',
+  moderate: '#F2C94C',
+  weak: '#F2994A',
+  lost: '#E53935',
+  unknown: palette.secondaryText,
 };
 
 const formatClock = (totalSeconds: number) => {
@@ -56,6 +72,62 @@ const formatFloat = (value: number | null, fractionDigits = 2) => {
   return value.toFixed(fractionDigits);
 };
 
+const getSignalInfo = (value: number | null): SignalInfo => {
+  if (value === null || !Number.isFinite(value)) {
+    return {
+      color: signalColors.unknown,
+      iconName: 'signal-cellular-outline',
+      label: 'Sem leitura',
+      value: '-- dBm',
+    };
+  }
+
+  const formattedValue = `${Math.trunc(value)} dBm`;
+
+  if (value >= -60) {
+    return {
+      color: signalColors.excellent,
+      iconName: 'signal-cellular-3',
+      label: 'Excelente',
+      value: formattedValue,
+    };
+  }
+
+  if (value >= -70) {
+    return {
+      color: signalColors.strong,
+      iconName: 'signal-cellular-3',
+      label: 'Forte',
+      value: formattedValue,
+    };
+  }
+
+  if (value >= -80) {
+    return {
+      color: signalColors.moderate,
+      iconName: 'signal-cellular-2',
+      label: 'Moderada',
+      value: formattedValue,
+    };
+  }
+
+  if (value >= -90) {
+    return {
+      color: signalColors.weak,
+      iconName: 'signal-cellular-1',
+      label: 'Fraca',
+      value: formattedValue,
+    };
+  }
+
+  return {
+    color: signalColors.lost,
+    iconName: 'signal-cellular-outline',
+    label: 'Conexão perdida',
+    value: formattedValue,
+  };
+};
+
 export default function HomeScreen() {
   const [isModalVisible, setIsModalVisible] = useState(false);
 
@@ -68,11 +140,13 @@ export default function HomeScreen() {
     disconnectFromDevice,
     spectrumState,
     statusChunk,
+    rssi,
   } = useBLEContext();
 
   const [liveSeconds, setLiveSeconds] = useState(0);
   const [realSeconds, setRealSeconds] = useState(0);
   const isAcquiring = spectrumState === ACQUIRING_STATE_FLAG;
+  const signalInfo = useMemo(() => getSignalInfo(rssi), [rssi]);
 
   useEffect(() => {
     setLiveSeconds(0);
@@ -141,6 +215,27 @@ export default function HomeScreen() {
               />
               <Text style={styles.brandTitle}>RID GAUG</Text>
               <Text style={styles.elapsedTime}>{formatClock(realSeconds)}</Text>
+              <View
+                style={[
+                  styles.signalIndicator,
+                  { borderColor: signalInfo.color },
+                ]}>
+                <MaterialCommunityIcons
+                  name={signalInfo.iconName}
+                  size={24}
+                  color={signalInfo.color}
+                />
+                <View style={styles.signalTextGroup}>
+                  <Text
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.78}
+                    numberOfLines={1}
+                    style={[styles.signalLabel, { color: signalInfo.color }]}>
+                    {signalInfo.label}
+                  </Text>
+                  <Text style={styles.signalValue}>{signalInfo.value}</Text>
+                </View>
+              </View>
             </View>
 
             <View style={styles.homeStatusList}>
@@ -245,6 +340,35 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 17,
     textAlign: 'center',
+  },
+  signalIndicator: {
+    width: 220,
+    minHeight: 46,
+    alignItems: 'center',
+    backgroundColor: '#111111',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'center',
+    marginTop: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  signalTextGroup: {
+    flex: 1,
+  },
+  signalLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  signalValue: {
+    color: palette.secondaryText,
+    fontSize: 11,
+    fontWeight: '500',
+    lineHeight: 14,
+    marginTop: 2,
   },
   welcome: {
     marginTop: 8,
