@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PermissionsAndroid, Platform } from "react-native";
 import {
   BleError,
@@ -29,6 +29,9 @@ const IDLE_STATE_FLAG = 0;
 export const ACQUIRING_STATE_FLAG = 1;
 export const MAX_SPECTRUM_CHANNELS = 4096;
 const MAX_DURATION_SECONDS = 0xffffffff;
+const RSSI_DISCONNECT_THRESHOLD_DBM = -92;
+const RSSI_DISCONNECT_DELAY_MS = 3000;
+const RSSI_POLL_INTERVAL_MS = 1000;
 
 export interface SpectrumAcquisitionConfig {
   channels: number;
@@ -228,16 +231,37 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
   const spectrumStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const weakSignalDisconnectTimeoutRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
   const [rssi, setRssi] = useState<number | null>(null);
   const spectrumAcquisitionActiveRef = useRef(false);
   const spectrumPauseRequestedRef = useRef(false);
 
-  const clearSpectrumStopTimer = () => {
+  const clearSpectrumStopTimer = useCallback(() => {
     if (spectrumStopTimeoutRef.current) {
       clearTimeout(spectrumStopTimeoutRef.current);
       spectrumStopTimeoutRef.current = null;
     }
-  };
+  }, []);
+
+  const clearWeakSignalDisconnectTimer = useCallback(() => {
+    if (weakSignalDisconnectTimeoutRef.current) {
+      clearTimeout(weakSignalDisconnectTimeoutRef.current);
+      weakSignalDisconnectTimeoutRef.current = null;
+    }
+  }, []);
+
+  const resetConnectionState = useCallback(() => {
+    clearSpectrumStopTimer();
+    clearWeakSignalDisconnectTimer();
+    spectrumAcquisitionActiveRef.current = false;
+    spectrumPauseRequestedRef.current = false;
+    setConnectedDevice(null);
+    setSpectrumState(null);
+    setStatusChunk(emptyStatusChunk);
+    setSetupConfig(null);
+    setRssi(null);
+  }, [clearSpectrumStopTimer, clearWeakSignalDisconnectTimer]);
 
   useEffect(() => {
     return () => {
@@ -247,6 +271,11 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
       if (spectrumStopTimeoutRef.current) {
         clearTimeout(spectrumStopTimeoutRef.current);
         spectrumStopTimeoutRef.current = null;
+      }
+
+      if (weakSignalDisconnectTimeoutRef.current) {
+        clearTimeout(weakSignalDisconnectTimeoutRef.current);
+        weakSignalDisconnectTimeoutRef.current = null;
       }
     };
   }, []);
@@ -312,6 +341,7 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     try {
       const deviceConnection = await bleManager.connectToDevice(device.id);
       setConnectedDevice(deviceConnection);
+      setRssi(null);
       await deviceConnection.discoverAllServicesAndCharacteristics();
       bleManager.stopDeviceScan();
 
@@ -327,17 +357,26 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     }
   };
 
+  const disconnectDevice = useCallback(
+    async (device: Device, reason: string) => {
+      resetConnectionState();
+
+      try {
+        await bleManager.cancelDeviceConnection(device.id);
+        console.log(`Conexão BLE encerrada: ${reason}`);
+      } catch (error) {
+        console.log("Erro ao encerrar conexão BLE:", error);
+      }
+    },
+    [resetConnectionState],
+  );
+
   const disconnectFromDevice = () => {
-    if (connectedDevice) {
-      clearSpectrumStopTimer();
-      spectrumAcquisitionActiveRef.current = false;
-      spectrumPauseRequestedRef.current = false;
-      bleManager.cancelDeviceConnection(connectedDevice.id);
-      setConnectedDevice(null);
-      setSpectrumState(null);
-      setStatusChunk(emptyStatusChunk);
-      setSetupConfig(null);
+    if (!connectedDevice) {
+      return;
     }
+
+    void disconnectDevice(connectedDevice, "desconexão manual");
   };
 
   const onSpectrumChunkUpdate = (
@@ -683,33 +722,81 @@ export default function useBLE(): BluetoothLowEnergyApiWithSpectrumConfig {
     }
   };
 
-  const readRssi = async () => {
-  if (!connectedDevice) {
-    return;
-  }
+  const isDisconnectedBleError = useCallback((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
 
-  try {
-    const deviceWithRssi = await connectedDevice.readRSSI();
-    setRssi(deviceWithRssi.rssi ?? null);
+    return message.toLowerCase().includes("not connected");
+  }, []);
 
-    console.log("RSSI:", deviceWithRssi.rssi);
-    } catch (error) {
-    console.log("Erro ao ler RSSI:", error);
-    }
-  };
+  const readRssi = useCallback(
+    async (targetDevice = connectedDevice) => {
+      if (!targetDevice) {
+        return;
+      }
+
+      try {
+        const deviceWithRssi = await targetDevice.readRSSI();
+        setRssi(deviceWithRssi.rssi ?? null);
+
+        console.log("RSSI:", deviceWithRssi.rssi);
+      } catch (error) {
+        console.log("Erro ao ler RSSI:", error);
+
+        if (isDisconnectedBleError(error)) {
+          void disconnectDevice(
+            targetDevice,
+            "perda de conexão detectada ao ler RSSI",
+          );
+        }
+      }
+    },
+    [connectedDevice, disconnectDevice, isDisconnectedBleError],
+  );
 
   useEffect(() => {
-  if (!connectedDevice) {
-    setRssi(null);
-    return;
-  }
+    if (!connectedDevice) {
+      setRssi(null);
+      clearWeakSignalDisconnectTimer();
+      return;
+    }
 
-  const interval = setInterval(() => {
-    readRssi();
-  }, 1000);
+    const device = connectedDevice;
 
-  return () => clearInterval(interval);
-}, [connectedDevice]);
+    void readRssi(device);
+
+    const interval = setInterval(() => {
+      void readRssi(device);
+    }, RSSI_POLL_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [clearWeakSignalDisconnectTimer, connectedDevice, readRssi]);
+
+  useEffect(() => {
+    if (
+      !connectedDevice ||
+      rssi === null ||
+      rssi >= RSSI_DISCONNECT_THRESHOLD_DBM
+    ) {
+      clearWeakSignalDisconnectTimer();
+      return;
+    }
+
+    if (weakSignalDisconnectTimeoutRef.current) {
+      return;
+    }
+
+    const device = connectedDevice;
+
+    weakSignalDisconnectTimeoutRef.current = setTimeout(() => {
+      weakSignalDisconnectTimeoutRef.current = null;
+      void disconnectDevice(
+        device,
+        `RSSI abaixo de ${RSSI_DISCONNECT_THRESHOLD_DBM} dBm por ${
+          RSSI_DISCONNECT_DELAY_MS / 1000
+        } segundos`,
+      );
+    }, RSSI_DISCONNECT_DELAY_MS);
+  }, [clearWeakSignalDisconnectTimer, connectedDevice, disconnectDevice, rssi]);
 
   const sendStatusTelemetry = async () => {
     if (!connectedDevice) {
