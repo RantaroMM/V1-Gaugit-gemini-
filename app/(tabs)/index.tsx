@@ -1,6 +1,6 @@
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import DeviceModal from '@/components/DeviceConnectionModal';
@@ -206,7 +206,10 @@ export default function HomeScreen() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.screen} edges={['left', 'right']}>
         {connectedDevice ? (
-          <>
+          <ScrollView
+            style={styles.connectedScroll}
+            contentContainerStyle={styles.connectedContent}
+            showsVerticalScrollIndicator={false}>
             <View style={styles.connectedHeader}>
               <Image
                 source={ridGaugLogo}
@@ -266,7 +269,7 @@ export default function HomeScreen() {
               </Pressable>
               <Text style={styles.connectedStatusText}>conectado</Text>
             </View>
-          </>
+          </ScrollView>
         ) : (
           <>
             <View style={styles.header}>
@@ -312,6 +315,13 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     backgroundColor: palette.background,
+  },
+  connectedScroll: {
+    width: '100%',
+  },
+  connectedContent: {
+    alignItems: 'center',
+    paddingBottom: 148,
   },
   header: {
     alignItems: 'center',
@@ -437,9 +447,8 @@ const styles = StyleSheet.create({
     opacity: 0.72,
   },
   connectedPowerGroup: {
-    position: 'absolute',
-    bottom: 128,
     alignItems: 'center',
+    marginTop: 48,
   },
   connectedPowerButton: {
     width: 98,
