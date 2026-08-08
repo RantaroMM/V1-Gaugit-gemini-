@@ -1,28 +1,132 @@
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import React, { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import DeviceModal from '@/components/DeviceConnectionModal';
 import { useBLEContext } from '@/contexts/BLEContext';
 import { Colors } from '@/constants/theme';
+import { ACQUIRING_STATE_FLAG } from '@/hooks/use-ble';
 
 const palette = Colors.dark;
+const loadingText = 'Carregando...';
+const ridGaugLogo = require('../../assets/images/rid-gaug-logo-mask.png');
 
-function LogoMark() {
-  return (
-    <View style={styles.logoFrame}>
-      <View style={styles.logoDiamond}>
-        <MaterialCommunityIcons
-          name="link-variant"
-          size={25}
-          color="#030303"
-          style={styles.logoIcon}
-        />
-      </View>
-    </View>
-  );
-}
+type HomeStatusRow = {
+  label: string;
+  value: string;
+};
+
+type SignalInfo = {
+  color: string;
+  iconName: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  label: string;
+  value: string;
+};
+
+const stateLabels: Record<number, string> = {
+  0: 'IDLE',
+  [ACQUIRING_STATE_FLAG]: 'ACQUIRING',
+};
+
+const signalColors = {
+  excellent: '#0B6B3A',
+  strong: '#7ED957',
+  moderate: '#F2C94C',
+  weak: '#F2994A',
+  lost: '#E53935',
+  unknown: palette.secondaryText,
+};
+
+const formatClock = (totalSeconds: number) => {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds
+    .toString()
+    .padStart(2, '0')}`;
+};
+
+const formatState = (state: number | null) => {
+  if (state === null) {
+    return loadingText;
+  }
+
+  return stateLabels[state] ?? state.toString();
+};
+
+const formatInteger = (value: number | null) => {
+  if (value === null || !Number.isFinite(value)) {
+    return loadingText;
+  }
+
+  return Math.trunc(value).toString();
+};
+
+const formatFloat = (value: number | null, fractionDigits = 2) => {
+  if (value === null || !Number.isFinite(value)) {
+    return loadingText;
+  }
+
+  return value.toFixed(fractionDigits);
+};
+
+const getSignalInfo = (value: number | null): SignalInfo => {
+  if (value === null || !Number.isFinite(value)) {
+    return {
+      color: signalColors.unknown,
+      iconName: 'signal-cellular-outline',
+      label: 'Sem leitura',
+      value: '-- dBm',
+    };
+  }
+
+  const formattedValue = `${Math.trunc(value)} dBm`;
+
+  if (value >= -60) {
+    return {
+      color: signalColors.excellent,
+      iconName: 'signal-cellular-3',
+      label: 'Excelente',
+      value: formattedValue,
+    };
+  }
+
+  if (value >= -70) {
+    return {
+      color: signalColors.strong,
+      iconName: 'signal-cellular-3',
+      label: 'Forte',
+      value: formattedValue,
+    };
+  }
+
+  if (value >= -80) {
+    return {
+      color: signalColors.moderate,
+      iconName: 'signal-cellular-2',
+      label: 'Moderada',
+      value: formattedValue,
+    };
+  }
+
+  if (value >= -90) {
+    return {
+      color: signalColors.weak,
+      iconName: 'signal-cellular-1',
+      label: 'Fraca',
+      value: formattedValue,
+    };
+  }
+
+  return {
+    color: signalColors.lost,
+    iconName: 'signal-cellular-outline',
+    label: 'Conexão perdida',
+    value: formattedValue,
+  };
+};
 
 export default function HomeScreen() {
   const [isModalVisible, setIsModalVisible] = useState(false);
@@ -34,7 +138,47 @@ export default function HomeScreen() {
     connectToDevice,
     connectedDevice,
     disconnectFromDevice,
+    spectrumState,
+    statusChunk,
+    rssi,
   } = useBLEContext();
+
+  const [liveSeconds, setLiveSeconds] = useState(0);
+  const [realSeconds, setRealSeconds] = useState(0);
+  const isAcquiring = spectrumState === ACQUIRING_STATE_FLAG;
+  const signalInfo = useMemo(() => getSignalInfo(rssi), [rssi]);
+
+  useEffect(() => {
+    setLiveSeconds(0);
+    setRealSeconds(0);
+  }, [connectedDevice?.id]);
+
+  useEffect(() => {
+    if (!connectedDevice) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setRealSeconds((currentSeconds) => currentSeconds + 1);
+
+      if (isAcquiring) {
+        setLiveSeconds((currentSeconds) => currentSeconds + 1);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [connectedDevice, isAcquiring]);
+
+  const connectedRows = useMemo<HomeStatusRow[]>(
+    () => [
+      { label: 'Estado:', value: formatState(spectrumState) },
+      { label: 'Contagem:', value: formatInteger(statusChunk.totalPulses) },
+      { label: 'CPS:', value: formatFloat(statusChunk.cps) },
+      { label: 'Live', value: liveSeconds.toString() },
+      { label: 'Real', value: realSeconds.toString() },
+    ],
+    [liveSeconds, realSeconds, spectrumState, statusChunk],
+  );
 
   const hideModal = () => {
     setIsModalVisible(false);
@@ -61,25 +205,99 @@ export default function HomeScreen() {
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.screen} edges={['left', 'right']}>
-        <View style={styles.header}>
-          <LogoMark />
-          <Text style={[styles.welcome]}>Bem vindo!</Text>
-        </View>
+        {connectedDevice ? (
+          <ScrollView
+            style={styles.connectedScroll}
+            contentContainerStyle={styles.connectedContent}
+            showsVerticalScrollIndicator={false}>
+            <View style={styles.connectedHeader}>
+              <Image
+                source={ridGaugLogo}
+                style={styles.connectedLogo}
+                tintColor={palette.primary}
+              />
+              <Text style={styles.brandTitle}>RID GAUG</Text>
+              <Text style={styles.elapsedTime}>{formatClock(realSeconds)}</Text>
+              <View
+                style={[
+                  styles.signalIndicator,
+                  { borderColor: signalInfo.color },
+                ]}>
+                <MaterialCommunityIcons
+                  name={signalInfo.iconName}
+                  size={24}
+                  color={signalInfo.color}
+                />
+                <View style={styles.signalTextGroup}>
+                  <Text
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.78}
+                    numberOfLines={1}
+                    style={[styles.signalLabel, { color: signalInfo.color }]}>
+                    {signalInfo.label}
+                  </Text>
+                  <Text style={styles.signalValue}>{signalInfo.value}</Text>
+                </View>
+              </View>
+            </View>
 
-        <Text style={styles.devicePrompt}>
-          {connectedDevice ? connectedDevice.name ?? 'Dispositivo conectado' : 'Conecte seu dispositivo'}
-        </Text>
+            <View style={styles.homeStatusList}>
+              {connectedRows.map((row) => (
+                <View key={row.label} style={styles.homeStatusRow}>
+                  <Text style={styles.homeStatusLabel}>{row.label}</Text>
+                  <Text
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.72}
+                    numberOfLines={1}
+                    style={styles.homeStatusValue}>
+                    {row.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
 
-        <View style={styles.powerGroup}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={connectedDevice ? 'Desconectar dispositivo' : 'Conectar dispositivo'}
-            onPress={handlePowerPress}
-            style={({ pressed }) => [styles.powerButton, pressed && styles.powerButtonPressed]}>
-            <MaterialCommunityIcons name="power" size={52} color={palette.secondaryText} />
-          </Pressable>
-          <Text style={styles.statusText}>{connectedDevice ? 'conectado' : 'desconectado'}</Text>
-        </View>
+            <View style={styles.connectedPowerGroup}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Desconectar dispositivo"
+                onPress={handlePowerPress}
+                style={({ pressed }) => [
+                  styles.connectedPowerButton,
+                  pressed && styles.powerButtonPressed,
+                ]}>
+                <MaterialCommunityIcons name="power" size={54} color={palette.tint} />
+              </Pressable>
+              <Text style={styles.connectedStatusText}>conectado</Text>
+            </View>
+          </ScrollView>
+        ) : (
+          <>
+            <View style={styles.header}>
+              <Image
+                source={ridGaugLogo}
+                style={styles.connectedLogo}
+                tintColor={palette.primary}
+              />
+              <Text style={[styles.welcome]}>Bem vindo!</Text>
+            </View>
+
+            <Text style={styles.devicePrompt}>Conecte seu dispositivo</Text>
+
+            <View style={styles.powerGroup}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Conectar dispositivo"
+                onPress={handlePowerPress}
+                style={({ pressed }) => [
+                  styles.powerButton,
+                  pressed && styles.powerButtonPressed,
+                ]}>
+                <MaterialCommunityIcons name="power" size={52} color={palette.secondaryText} />
+              </Pressable>
+              <Text style={styles.statusText}>desconectado</Text>
+            </View>
+          </>
+        )}
 
         <DeviceModal
           closeModal={hideModal}
@@ -98,27 +316,69 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: palette.background,
   },
+  connectedScroll: {
+    width: '100%',
+  },
+  connectedContent: {
+    alignItems: 'center',
+    paddingBottom: 148,
+  },
   header: {
     alignItems: 'center',
     marginTop: 100,
   },
-  logoFrame: {
-    width: 100,
-    height: 100,
+  connectedHeader: {
     alignItems: 'center',
-    justifyContent: 'center',
+    marginTop: 72,
   },
-  logoDiamond: {
-    width: 56,
-    height: 56,
+  connectedLogo: {
+    width: 90,
+    height: 89,
+    resizeMode: 'contain',
+  },
+  brandTitle: {
+    marginTop: 8,
+    color: palette.primary,
+    fontSize: 20,
+    fontWeight: '400',
+    lineHeight: 24,
+    textAlign: 'center',
+  },
+  elapsedTime: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '400',
+    lineHeight: 17,
+    textAlign: 'center',
+  },
+  signalIndicator: {
+    width: 220,
+    minHeight: 46,
     alignItems: 'center',
+    backgroundColor: '#111111',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
     justifyContent: 'center',
-    backgroundColor: palette.primary,
-    borderRadius: 7,
-    transform: [{ rotate: '45deg' }],
+    marginTop: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
-  logoIcon: {
-    transform: [{ rotate: '-45deg' }],
+  signalTextGroup: {
+    flex: 1,
+  },
+  signalLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  signalValue: {
+    color: palette.secondaryText,
+    fontSize: 11,
+    fontWeight: '500',
+    lineHeight: 14,
+    marginTop: 2,
   },
   welcome: {
     marginTop: 8,
@@ -139,8 +399,40 @@ const styles = StyleSheet.create({
   },
   powerGroup: {
     position: 'absolute',
-    bottom: 148,
+    bottom: 128,
     alignItems: 'center',
+  },
+  homeStatusList: {
+    alignItems: 'center',
+    gap: 16,
+    marginTop: 32,
+    paddingHorizontal: 16,
+    width: '100%',
+  },
+  homeStatusRow: {
+    width: '100%',
+    maxWidth: 320,
+    height: 36,
+    alignItems: 'center',
+    borderColor: palette.primary,
+    borderRadius: 18,
+    borderWidth: 1,
+    flexDirection: 'row',
+    paddingHorizontal: 26,
+  },
+  homeStatusLabel: {
+    width: 101,
+    color: palette.primary,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 20,
+  },
+  homeStatusValue: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '400',
+    lineHeight: 20,
   },
   powerButton: {
     width: 86,
@@ -153,6 +445,27 @@ const styles = StyleSheet.create({
   },
   powerButtonPressed: {
     opacity: 0.72,
+  },
+  connectedPowerGroup: {
+    alignItems: 'center',
+    marginTop: 48,
+  },
+  connectedPowerButton: {
+    width: 98,
+    height: 98,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: palette.primary,
+    borderRadius: 49,
+  },
+  connectedStatusText: {
+    marginTop: 16,
+    color: palette.tint,
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '400',
+    textAlign: 'center',
   },
   statusText: {
     marginTop: 12,

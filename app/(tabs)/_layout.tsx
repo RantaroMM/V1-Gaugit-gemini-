@@ -7,6 +7,7 @@ import { Colors } from "@/constants/theme";
 import { BLEProvider } from "@/contexts/BLEContext";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { StyleSheet } from "react-native";
 
 export default function TabLayout() {
@@ -46,6 +47,29 @@ export default function TabLayout() {
             ),
           }}
         />
+        <Tabs.Screen
+          name="monitor"
+          options={{
+            title: "Monitorar",
+            tabBarIcon: ({ color }) => (
+              <MaterialCommunityIcons
+                size={20}
+                name="monitor"
+                color={color}
+              />
+            ),
+          }}
+        />
+        <Tabs.Screen 
+          name="setup"
+          options={{
+            title: "Setup",
+            tabBarIcon: ({ color }) => (
+              <MaterialIcons name="display-settings" size={20} color={color} />
+            )
+          }}
+        >
+        </Tabs.Screen>
       </Tabs>
     </BLEProvider>
   );
